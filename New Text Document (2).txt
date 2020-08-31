@@ -1,0 +1,430 @@
+public class Service : ServiceBase
+{
+    // Fields
+    private int serviceInterval;
+    private List<SyncModel> syncAPIs;
+    private Timer timer;
+    private bool syncStatusLog;
+    private bool syncExceptionLog;
+    private bool sendMail;
+    private IContainer components;
+
+    // Methods
+    public Service()
+    {
+        this.InitializeComponent();
+        this.GetConfigurationSettings();
+        this.timer = new Timer();
+        this.timer.Interval = (this.serviceInterval * 60) * 0x3e8;
+        this.timer.Elapsed += new ElapsedEventHandler(this.Timer_Elapsed);
+    }
+
+    [AsyncStateMachine(typeof(<CallWebAPI>d__11))]
+    private Task CallWebAPI(SyncModel model)
+    {
+        <CallWebAPI>d__11 d__;
+        d__.<>4__this = this;
+        d__.model = model;
+        d__.<>t__builder = AsyncTaskMethodBuilder.Create();
+        d__.<>1__state = -1;
+        d__.<>t__builder.Start<<CallWebAPI>d__11>(ref d__);
+        return d__.<>t__builder.Task;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && (this.components != null))
+        {
+            this.components.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void GetConfigurationSettings()
+    {
+        this.syncAPIs = new List<SyncModel>();
+        this.serviceInterval = Convert.ToInt32(ConfigurationManager.AppSettings["ServiceInterval"]);
+        char[] separator = new char[] { ';' };
+        foreach (string str in (from s in ConfigurationManager.AppSettings["SyncAPIKeys"].Split(separator).ToList<string>()
+            where !string.IsNullOrWhiteSpace(s)
+            select s).Distinct<string>().ToList<string>())
+        {
+            this.syncAPIs.Add(new SyncModel(str, ConfigurationManager.AppSettings[str], "Not Started"));
+        }
+        this.syncStatusLog = Convert.ToBoolean(ConfigurationManager.AppSettings["SyncStatusLog"]);
+        this.syncExceptionLog = Convert.ToBoolean(ConfigurationManager.AppSettings["SyncExceptionLog"]);
+        this.sendMail = Convert.ToBoolean(ConfigurationManager.AppSettings["SendMail"]);
+    }
+
+    private string GetMailBody()
+    {
+        string str = string.Empty;
+        str = "<html> <body><p> Hi,</p> <p> Please find the status of mProcure Sync service below,</p><br/> <table border='1' cellpadding='0' cellspacing='0' style='width:600'><tr><th> API Name </th><th> Status </th></tr>";
+        foreach (SyncModel model in this.syncAPIs)
+        {
+            string[] textArray1 = new string[6];
+            textArray1[0] = str;
+            textArray1[1] = "<tr><td width='200'>";
+            textArray1[2] = model.SyncAPIKey;
+            textArray1[3] = "</td><td width='400'>";
+            textArray1[4] = (model.SyncStatus == "Sync Failed") ? (model.SyncStatus + " - " + model.Message) : model.SyncStatus;
+            string[] local1 = textArray1;
+            local1[5] = "</td></tr>";
+            str = string.Concat(local1);
+        }
+        return (str + " </table></body></html>");
+    }
+
+    private void InitializeComponent()
+    {
+        base.ServiceName = "mProcure Sync Service";
+    }
+
+    protected override void OnStart(string[] args)
+    {
+        this.WriteStatusLog("mProcure Sync service started");
+        this.timer.AutoReset = true;
+        this.timer.Enabled = true;
+        this.timer.Start();
+    }
+
+    protected override void OnStop()
+    {
+        this.WriteStatusLog("mProcure Sync service stopped");
+        this.timer.AutoReset = false;
+        this.timer.Enabled = false;
+    }
+
+    private void ProcessSyncAPIs()
+    {
+        try
+        {
+            this.WriteStatusLog("Sync Started");
+            foreach (SyncModel model in this.syncAPIs)
+            {
+                try
+                {
+                    this.CallWebAPI(model).Wait();
+                }
+                catch (Exception exception)
+                {
+                    model.SyncStatus = "Sync Failed";
+                    model.Message = exception.Message;
+                    this.WriteErrorLog(exception);
+                }
+            }
+            this.WriteStatusLog("Sync Completed");
+        }
+        catch (Exception exception2)
+        {
+            this.WriteErrorLog(exception2);
+        }
+    }
+
+    public void SendMail()
+    {
+        try
+        {
+            if (this.sendMail)
+            {
+                string userName = ConfigurationManager.AppSettings["SenderID"];
+                string password = ConfigurationManager.AppSettings["SenderPassword"];
+                string address = ConfigurationManager.AppSettings["SenderMail"];
+                string str6 = ConfigurationManager.AppSettings["GroupAddress"];
+                SmtpClient client = new SmtpClient {
+                    Host = ConfigurationManager.AppSettings["HostName"],
+                    Port = Convert.ToInt32(ConfigurationManager.AppSettings["PortNumber"]),
+                    EnableSsl = Convert.ToBoolean(ConfigurationManager.AppSettings["EnableSsl"]),
+                    DeliveryMethod = SmtpDeliveryMethod.Network,
+                    Timeout = 0x7530
+                };
+                if (ConfigurationManager.AppSettings["UseDefaultCredentials"].Contains("true"))
+                {
+                    client.UseDefaultCredentials = true;
+                }
+                else
+                {
+                    client.UseDefaultCredentials = false;
+                    client.Credentials = new NetworkCredential(userName, password);
+                }
+                MailMessage message = new MailMessage {
+                    From = new MailAddress(address)
+                };
+                if (!string.IsNullOrEmpty(str6))
+                {
+                    char[] separator = new char[] { ',' };
+                    foreach (string str7 in str6.Split(separator))
+                    {
+                        message.To.Add(new MailAddress(str7));
+                    }
+                }
+                message.IsBodyHtml = true;
+                message.Body = this.GetMailBody();
+                message.Subject = "mProcure - Sync Service Status" + (this.syncAPIs.Any<SyncModel>(i => (i.SyncStatus == "Sync Failed")) ? " - Failed" : " - Success");
+                ServicePointManager.ServerCertificateValidationCallback = (s, certificate, chain, sslPolicyErrors) => true;
+                client.Send(message);
+            }
+        }
+        catch (Exception exception)
+        {
+            this.WriteErrorLog(exception);
+        }
+    }
+
+    private void Timer_Elapsed(object sender, ElapsedEventArgs e)
+    {
+        this.ProcessSyncAPIs();
+        this.SendMail();
+    }
+
+    private void WriteErrorLog(Exception ex)
+    {
+        StreamWriter writer = null;
+        try
+        {
+            if (this.syncExceptionLog)
+            {
+                if (!Directory.Exists(AppDomain.CurrentDomain.BaseDirectory + @"\Logs\"))
+                {
+                    Directory.CreateDirectory(AppDomain.CurrentDomain.BaseDirectory + @"\Logs\");
+                }
+                writer = new StreamWriter(AppDomain.CurrentDomain.BaseDirectory + @"\Logs\ErrorLog_" + DateTime.Now.ToString("MMddyyyy") + ".txt", true);
+                writer.WriteLine(DateTime.Now.ToString() + ": " + ex.Message.ToString().Trim());
+                if (ex.InnerException != null)
+                {
+                    writer.WriteLine(ex.InnerException.ToString());
+                }
+                if (ex.StackTrace != null)
+                {
+                    writer.WriteLine(ex.StackTrace);
+                }
+                writer.Flush();
+                writer.Close();
+            }
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void WriteStatusLog(string message)
+    {
+        try
+        {
+            if (this.syncStatusLog)
+            {
+                if (!Directory.Exists(AppDomain.CurrentDomain.BaseDirectory + @"\Logs\"))
+                {
+                    Directory.CreateDirectory(AppDomain.CurrentDomain.BaseDirectory + @"\Logs\");
+                }
+                StreamWriter writer1 = new StreamWriter(AppDomain.CurrentDomain.BaseDirectory + @"\Logs\StatusLog_" + DateTime.Now.ToString("MMddyyyy") + ".txt", true);
+                writer1.WriteLine(DateTime.Now.ToString() + ": " + message);
+                writer1.Flush();
+                writer1.Close();
+            }
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    // Nested Types
+    [Serializable, CompilerGenerated]
+    private sealed class <>c
+    {
+        // Fields
+        public static readonly Service.<>c <>9 = new Service.<>c();
+        public static Func<string, bool> <>9__12_0;
+        public static Func<SyncModel, bool> <>9__16_0;
+        public static RemoteCertificateValidationCallback <>9__16_1;
+
+        // Methods
+        internal bool <GetConfigurationSettings>b__12_0(string s) => 
+            !string.IsNullOrWhiteSpace(s);
+
+        internal bool <SendMail>b__16_0(SyncModel i) => 
+            (i.SyncStatus == "Sync Failed");
+
+        internal bool <SendMail>b__16_1(object s, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors) => 
+            true;
+    }
+
+    [CompilerGenerated]
+    private struct <CallWebAPI>d__11 : IAsyncStateMachine
+    {
+        // Fields
+        public int <>1__state;
+        public AsyncTaskMethodBuilder <>t__builder;
+        public SyncModel model;
+        public Service <>4__this;
+        private HttpClient <client>5__2;
+        private TaskAwaiter<HttpResponseMessage> <>u__1;
+
+        // Methods
+        private void MoveNext()
+        {
+            int num = this.<>1__state;
+            Service service = this.<>4__this;
+            try
+            {
+                if (num != 0)
+                {
+                    this.<client>5__2 = new HttpClient();
+                }
+                try
+                {
+                    HttpResponseMessage message;
+                    TaskAwaiter<HttpResponseMessage> awaiter;
+                    if (num == 0)
+                    {
+                        awaiter = this.<>u__1;
+                        this.<>u__1 = new TaskAwaiter<HttpResponseMessage>();
+                        this.<>1__state = num = -1;
+                        goto TR_000A;
+                    }
+                    else
+                    {
+                        this.<client>5__2.Timeout = TimeSpan.FromMinutes(90.0);
+                        awaiter = this.<client>5__2.GetAsync(this.model.SyncAPIUrl).GetAwaiter();
+                        if (awaiter.IsCompleted)
+                        {
+                            goto TR_000A;
+                        }
+                        else
+                        {
+                            this.<>1__state = num = 0;
+                            this.<>u__1 = awaiter;
+                            this.<>t__builder.AwaitUnsafeOnCompleted<TaskAwaiter<HttpResponseMessage>, Service.<CallWebAPI>d__11>(ref awaiter, ref this);
+                        }
+                    }
+                    return;
+                TR_000A:
+                    message = awaiter.GetResult();
+                    message.EnsureSuccessStatusCode();
+                    if (message.IsSuccessStatusCode)
+                    {
+                        this.model.SyncStatus = "Sync Success";
+                        service.WriteStatusLog("Sync Success - API:" + this.model.SyncAPIKey);
+                    }
+                    else
+                    {
+                        this.model.SyncStatus = "Sync Failed";
+                        this.model.Message = "StatusCode :" + message.StatusCode.ToString() + " - Reason:" + message.ReasonPhrase;
+                        string[] textArray1 = new string[] { "Sync Failed - API:", this.model.SyncAPIKey, " - StatusCode :", message.StatusCode.ToString(), " - Reason:", message.ReasonPhrase };
+                        service.WriteStatusLog(string.Concat(textArray1));
+                    }
+                    goto TR_0007;
+                }
+                finally
+                {
+                    if ((num < 0) && (this.<client>5__2 != null))
+                    {
+                        this.<client>5__2.Dispose();
+                    }
+                }
+                return;
+            TR_0007:
+                this.<client>5__2 = null;
+                this.<>1__state = -2;
+                this.<>t__builder.SetResult();
+            }
+            catch (Exception exception)
+            {
+                this.<>1__state = -2;
+                this.<>t__builder.SetException(exception);
+            }
+        }
+
+        [DebuggerHidden]
+        private void SetStateMachine(IAsyncStateMachine stateMachine)
+        {
+            this.<>t__builder.SetStateMachine(stateMachine);
+        }
+    }
+}
+
+ 
+Collapse Methods
+ 
+
+
+
+public class SyncModel
+{
+    // Methods
+    public SyncModel()
+    {
+    }
+
+    public SyncModel(string syncAPIKey, string syncAPIUrl, string syncStatus)
+    {
+        this.SyncAPIKey = syncAPIKey;
+        this.SyncAPIUrl = syncAPIUrl;
+        this.SyncStatus = syncStatus;
+        this.Message = string.Empty;
+    }
+
+    // Properties
+    public string SyncAPIKey { get; set; }
+
+    public string SyncAPIUrl { get; set; }
+
+    public string SyncStatus { get; set; }
+
+    public string Message { get; set; }
+}
+
+
+
+
+[RunInstaller(true)]
+public class ProjectInstaller : Installer
+{
+    // Fields
+    private IContainer components;
+    private ServiceProcessInstaller serviceProcessInstaller1;
+    private ServiceInstaller serviceInstaller1;
+
+    // Methods
+    public ProjectInstaller()
+    {
+        this.InitializeComponent();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && (this.components != null))
+        {
+            this.components.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void InitializeComponent()
+    {
+        this.serviceProcessInstaller1 = new ServiceProcessInstaller();
+        this.serviceInstaller1 = new ServiceInstaller();
+        this.serviceProcessInstaller1.Account = ServiceAccount.LocalService;
+        this.serviceProcessInstaller1.Password = null;
+        this.serviceProcessInstaller1.Username = null;
+        this.serviceInstaller1.ServiceName = "mProcure Sync Service";
+        this.serviceInstaller1.StartType = ServiceStartMode.Automatic;
+        Installer[] installerArray1 = new Installer[] { this.serviceProcessInstaller1, this.serviceInstaller1 };
+        base.Installers.AddRange(installerArray1);
+    }
+}
+
+
+internal static class Program
+{
+    // Methods
+    private static void Main()
+    {
+        ServiceBase[] services = new ServiceBase[] { new Service() };
+        ServiceBase.Run(services);
+    }
+}
+
+ 
+Collapse Methods
+ 
